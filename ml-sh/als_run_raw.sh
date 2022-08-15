@@ -6,14 +6,16 @@ case "$1" in
   echo "Usage: <data structure> <dataset name>"
   echo "1st argument: type of data structure: [dataframe/rdd]"
   echo "2nd argument: name of dataset: e.g. als"
+  echo "3rd argument: name of API: e.g. fit/fit1/fit2/fit3"
   exit 0
   ;;
 esac
 
-if [ $# -ne 2 ]; then
+if [ $# -ne 3 ]; then
   echo "please input 2 arguments: <data structure> <dataset name>"
   echo "1st argument: type of data structure: [dataframe/rdd]"
   echo "2nd argument: name of dataset: e.g. als"
+  echo "3rd argument: name of API: e.g. fit/fit1/fit2/fit3"
   exit 0
 fi
 
@@ -22,9 +24,11 @@ source conf/ml/als/als_spark.properties
 
 data_structure=$1
 dataset_name=$2
+api_name=$3
+
 cpu_name=$(lscpu | grep Architecture | awk '{print $2}')
 
-model_conf=${data_structure}_${dataset_name}
+model_conf=${data_structure}_${dataset_name}_${api_name}
 
 # concatnate strings as a new variable
 num_executors="numExectuors_"${cpu_name}

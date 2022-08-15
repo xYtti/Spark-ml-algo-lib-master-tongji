@@ -2,10 +2,8 @@ package com.bigdata.ml
 
 import java.io.{File, FileWriter}
 import java.util
-
 import scala.beans.BeanProperty
 import scala.collection.mutable
-
 import com.bigdata.utils.Utils
 import org.apache.spark.ml.recommendation.ALS
 import org.apache.spark.mllib.recommendation.Rating
@@ -13,6 +11,8 @@ import org.apache.spark.mllib.linalg.SparseVector
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.SparkConf
+import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.spark.ml.param.{ParamMap, ParamPair}
 import org.yaml.snakeyaml.{DumperOptions, TypeDescription, Yaml}
 import org.yaml.snakeyaml.constructor.Constructor
 import org.yaml.snakeyaml.nodes.Tag
@@ -33,42 +33,28 @@ class ALSParams extends Serializable {
   @BeanProperty var alpha: Double = _
 
   @BeanProperty var trainingDataPath: String = _
+  @BeanProperty var apiName: String = _
   @BeanProperty var dataStructure: String = _
   @BeanProperty var datasetName: String = _
   @BeanProperty var evaluation: Double = _
   @BeanProperty var costTime: Double = _
   @BeanProperty var cpuName: String = _
-  @BeanProperty var apiName: String = _
   @BeanProperty var isRaw: String = _
   @BeanProperty var startTime: Long = _
   @BeanProperty var algorithmName: String = _
   @BeanProperty var testcaseType: String = _
+  @BeanProperty var saveDataPath: String = _
+  @BeanProperty var verifiedDataPath: String = _
 }
 
 object ALSRunner {
-
-  def Vector2Rating(rawdata: RDD[SparseVector]) : RDD[Rating] = {
-    val Ratingdata: RDD[Rating] = rawdata.zipWithIndex().flatMap{
-      case (v, i) =>
-        val arr = mutable.ArrayBuilder.make[Rating]
-        arr.sizeHint(v.numActives)
-        v.foreachActive{(ii, vi) =>
-          arr += Rating(i.toInt, ii, vi.toFloat)
-        }
-        arr.result()
-    }
-    Ratingdata
-  }
-
   def main(args: Array[String]): Unit = {
     try {
       val modelConfSplit = args(0).split("_")
-      val (dataStructure, datasetName) = (modelConfSplit(0), modelConfSplit(1))
-
+      val (dataStructure, datasetName, apiName) = (modelConfSplit(0), modelConfSplit(1), modelConfSplit(2))
       val dataPath = args(1)
       val dataPathSplit = dataPath.split(",")
       val trainingDataPath = dataPathSplit(0)
-
       val cpuName = args(2)
       val isRaw = args(3)
       val sparkConfSplit = args(4).split("_")
@@ -83,7 +69,6 @@ object ALSRunner {
         case ("x86_64", "yes") =>
           Utils.getStream("conf/ml/als/als_raw.yml")
       }
-
       val representer = new Representer
       representer.addClassTag(classOf[ALSParams], Tag.MAP)
       val options = new DumperOptions
@@ -92,30 +77,31 @@ object ALSRunner {
       val description = new TypeDescription(classOf[ALSParams])
       yaml.addTypeDescription(description)
       val configs: ALSConfig = yaml.load(stream).asInstanceOf[ALSConfig]
+      val paramsMap: util.HashMap[String, Object] = configs.als.get(cpuName).get(dataStructure).get(datasetName)
       val params = new ALSParams()
-
-      val alsParamMap: util.HashMap[String, Object] = configs.als.get(cpuName).get(dataStructure).get(datasetName)
-      params.setPt(alsParamMap.getOrDefault("pt", "1000").asInstanceOf[Int])
-      params.setNumIterations(alsParamMap.getOrDefault("numIterations", "200").asInstanceOf[Int])
-      params.setNonnegative(alsParamMap.getOrDefault("nonnegative", "false").asInstanceOf[Boolean])
-      params.setImplicitPrefs(alsParamMap.getOrDefault("implicitPrefs", "false").asInstanceOf[Boolean])
-      params.setNumItemBlocks(alsParamMap.getOrDefault("numItemBlocks", "228").asInstanceOf[Int])
-      params.setNumUserBlocks(alsParamMap.getOrDefault("numUserBlocks", "228").asInstanceOf[Int])
-      params.setRegParam(alsParamMap.getOrDefault("regParam", "0.0").asInstanceOf[Double])
-      params.setAlpha(alsParamMap.getOrDefault("alpha", "1.0").asInstanceOf[Double])
-
+      params.setPt(paramsMap.getOrDefault("pt", "1000").asInstanceOf[Int])
+      params.setNumIterations(paramsMap.getOrDefault("numIterations", "200").asInstanceOf[Int])
+      params.setNonnegative(paramsMap.getOrDefault("nonnegative", "false").asInstanceOf[Boolean])
+      params.setImplicitPrefs(paramsMap.getOrDefault("implicitPrefs", "false").asInstanceOf[Boolean])
+      params.setNumItemBlocks(paramsMap.getOrDefault("numItemBlocks", "228").asInstanceOf[Int])
+      params.setNumUserBlocks(paramsMap.getOrDefault("numUserBlocks", "228").asInstanceOf[Int])
+      params.setRegParam(paramsMap.getOrDefault("regParam", "0.0").asInstanceOf[Double])
+      params.setAlpha(paramsMap.getOrDefault("alpha", "1.0").asInstanceOf[Double])
       params.setTrainingDataPath(trainingDataPath)
       params.setDataStructure(dataStructure)
       params.setDatasetName(datasetName)
+      params.setApiName(apiName)
       params.setCpuName(cpuName)
       params.setIsRaw(isRaw)
       params.setAlgorithmName("ALS")
-      params.setTestcaseType(s"ALS_${dataStructure}_${datasetName}")
+      params.setTestcaseType(s"ALS_${dataStructure}_${datasetName}_${apiName}")
+      params.setSaveDataPath(s"hdfs:///tmp/ml/result/${params.algorithmName}/${datasetName}_${dataStructure}_${apiName}_${cpuName}")
+
       if (isRaw.equals("yes")){
-        params.setTestcaseType(s"ALS_raw_${dataStructure}_${datasetName}")
+        params.setTestcaseType(s"ALS_raw_${dataStructure}_${datasetName}_${apiName}")
+        params.setVerifiedDataPath(params.saveDataPath)
+        params.setSaveDataPath(s"${params.saveDataPath}_raw")
       }
-
-
       val conf = isRaw match {
         case "yes" =>
           new SparkConf().setAppName(s"ALS_raw_${dataStructure}_${datasetName}").setMaster(master)
@@ -129,7 +115,6 @@ object ALSRunner {
         ("spark.executor.memory", execMem)
       )
       conf.setAll(commonParas)
-
       val spark = SparkSession.builder.config(conf).getOrCreate()
       println(s"Initialized spark session.")
       val startTime = System.currentTimeMillis()
@@ -138,48 +123,51 @@ object ALSRunner {
 
       import spark.implicits._
       val rawdata: RDD[SparseVector] = sc.objectFile(dataPath).repartition(params.pt)
-
       val (predictions, costTime) = dataStructure match {
         case "dataframe" =>
-          params.apiName = "fit"
           val ratings = Vector2Rating(rawdata).toDF().cache()
           println("count: " + ratings.count())
           val mapTime = System.currentTimeMillis()
           println("map cost Time[seconds]: " + (mapTime - startTime).toDouble / 1000.0)
-          new ALSKernel().alsDataframeJob(spark, ratings, params)
+          new ALSKernel().runDataframeJob(spark, ratings, params)
         case "rdd" =>
           params.apiName = "run"
           val ratings: RDD[Rating] = Vector2Rating(rawdata).cache()
           println("count: " + ratings.count())
           val mapTime = System.currentTimeMillis()
           println("map cost Time[seconds]: " + (mapTime - startTime).toDouble / 1000.0)
-          new ALSKernel().alsRDDJob(spark, ratings, params)
+          new ALSKernel().runRDDJob(spark, ratings, params)
       }
       params.setEvaluation(predictions)
       params.setCostTime(costTime)
 
-      val folder = new File("report")
-      if (!folder.exists()) {
-        val mkdir = folder.mkdirs()
-        println(s"Create dir report ${mkdir}")
-      }
-      val writer = new FileWriter(s"report/ALS_${
-        Utils.getDateStrFromUTC("yyyyMMdd_HHmmss",
-          System.currentTimeMillis())
-      }.yml")
-
-      yaml.dump(params, writer)
+      Utils.saveYml[ALSParams](params, yaml)
       println(s"Exec Successful: costTime: ${costTime}s; evaluation: ${predictions}")
     } catch {
       case e: Throwable =>
         println(s"Exec Failure: ${e.getMessage}")
     }
+
+
+      def Vector2Rating(rawdata: RDD[SparseVector]) : RDD[Rating] = {
+        val Ratingdata: RDD[Rating] = rawdata.zipWithIndex().flatMap{
+          case (v, i) =>
+            val arr = mutable.ArrayBuilder.make[Rating]
+            arr.sizeHint(v.numActives)
+            v.foreachActive{(ii, vi) =>
+              arr += Rating(i.toInt, ii, vi.toFloat)
+            }
+            arr.result()
+        }
+        Ratingdata
+      }
   }
 }
 
 class ALSKernel {
 
-  def alsDataframeJob(spark: SparkSession, ratings: DataFrame, params: ALSParams): (Double, Double) = {
+  def runDataframeJob(spark: SparkSession, ratings: DataFrame, params: ALSParams): (Double, Double) = {
+    val sc = spark.sparkContext
     val numIterations = params.numIterations
     val nonnegative = params.nonnegative
     val implicitPrefs = params.implicitPrefs
@@ -200,13 +188,31 @@ class ALSKernel {
       .setRegParam(regParam)
       .setAlpha(alpha)
 
-    val model = als.fit(ratings)
+    val paramMap = ParamMap(als.maxIter -> params.numIterations)
+      .put(als.regParam, params.regParam)
+
+    val paramMaps: Array[ParamMap] = new Array[ParamMap](2)
+    for (i <- 0 to paramMaps.size -1) {
+      paramMaps(i) = ParamMap(als.maxIter -> params.numIterations)
+        .put(als.regParam, params.regParam)
+    }
+    val maxIterParamPair = ParamPair(als.maxIter, params.numIterations)
+    val regParamPair = ParamPair(als.regParam, params.regParam)
+    val model = params.apiName match {
+      case "fit" => als.fit(ratings)
+      case "fit1" => als.fit(ratings, paramMap)
+      case "fit2" =>
+        val models = als.fit(ratings, paramMaps)
+        models(0)
+      case "fit3" => als.fit(ratings, maxIterParamPair, regParamPair)
+    }
+
     val costTime = (System.currentTimeMillis() - params.startTime) / 1000.0
 
     model.setColdStartStrategy("drop")
     val predictions = model.transform(ratings)
 
-    val predictValue = if (params.implicitPrefs) {
+    val res = if (params.implicitPrefs) {
       val p = predictions.select("rating", "prediction").rdd
         .map{ case Row(label: Double, prediction: Float) => (label, prediction) }
         .map{ case (r1, r2) =>
@@ -226,11 +232,15 @@ class ALSKernel {
       println("Mean Squared Error = " + p)
       p
     }
-    (predictValue, costTime)
+
+    Utils.saveAndVerifyRes[ALSParams](params, res, sc)
+
+    (res, costTime)
   }
 
-  def alsRDDJob(spark: SparkSession, ratings: RDD[Rating], params: ALSParams): (Double, Double) = {
+  def runRDDJob(spark: SparkSession, ratings: RDD[Rating], params: ALSParams): (Double, Double) = {
 
+    val sc = spark.sparkContext
     val numIterations = params.numIterations
     val nonnegative = params.nonnegative
     val implicitPrefs = params.implicitPrefs
@@ -255,7 +265,7 @@ class ALSKernel {
       ((user, product), rate)
     }.join(predictions)
 
-    val predictValue = if (implicitPrefs) {
+    val res = if (implicitPrefs) {
       val p = ratesAndPreds.map{ case ((user, product), (r1, r2)) => (r1, r2)}
         .map{ case (r1, r2) =>
           val pr = if (r1 > 0.0) 1.0f else 0.0f
@@ -273,7 +283,10 @@ class ALSKernel {
       println("Mean Squared Error = " + p)
       p
     }
-    (predictValue, costTime)
+
+    Utils.saveAndVerifyRes[ALSParams](params, res, sc)
+
+    (res, costTime)
   }
 
 }

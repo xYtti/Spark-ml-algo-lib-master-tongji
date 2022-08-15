@@ -3,16 +3,18 @@ set -e
 
 case "$1" in
 -h | --help | ?)
-  echo "Usage: <dataset name>"
+  echo "Usage: <dataset name> <api name>"
   echo "1st argument: name of dataset: e.g. Kemelmacher"
+  echo "2rd argument: name of API: e.g. fit/fit1/fit2/fit3"
   echo "If you want to save the results, plz change the configuration [saveRes] in <spca.yml>"
   exit 0
   ;;
 esac
 
-if [ $# -ne 1 ]; then
+if [ $# -ne 2 ]; then
   echo "please input 1 argument: <dataset name>"
   echo "1st argument: name of dataset: e.g. Kemelmacher"
+  echo "2rd argument: name of API: e.g. fit/fit1/fit2/fit3"
   echo "If you want to save the results, plz change the configuration <saveRes>"
   exit 0
 fi
@@ -21,8 +23,9 @@ fi
 source conf/ml/spca/spca_spark.properties
 
 dataset_name=$1
+api_name=$2
 cpu_name=$(lscpu | grep Architecture | awk '{print $2}')
-model_conf=${dataset_name}
+model_conf=${dataset_name}-${api_name}
 
 # concatnate strings as a new variable
 num_executors="numExectuors_"${dataset_name}_${cpu_name}

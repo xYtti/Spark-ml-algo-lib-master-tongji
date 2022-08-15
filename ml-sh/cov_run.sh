@@ -71,6 +71,7 @@ if [ ! ${num_executors_val} ] \
   exit 0
 fi
 
+
 source conf/ml/ml_datasets.properties
 spark_version=sparkVersion
 spark_version_val=${!spark_version}
@@ -85,8 +86,11 @@ ssh agent2 "echo 3 > /proc/sys/vm/drop_caches"
 ssh agent3 "echo 3 > /proc/sys/vm/drop_caches"
 sleep 30
 
+
 mkdir -p log
 echo "start to submit spark jobs --- Cov-${model_conf}"
+
+
 
 spark-submit \
 --driver-class-path "lib/fastutil-8.3.1.jar:lib/snakeyaml-1.19.jar:lib/boostkit-ml-acc_2.11-1.3.0-${spark_version_val}.jar:lib/boostkit-ml-core_2.11-1.3.0-${spark_version_val}.jar:lib/boostkit-ml-kernel-2.11-1.3.0-${spark_version_val}-${platform_name}.jar" \

@@ -4,6 +4,7 @@ import java.io.{File, FileWriter}
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.ml.Pipeline
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.yaml.snakeyaml.{DumperOptions, TypeDescription, Yaml}
 import org.yaml.snakeyaml.constructor.Constructor
 import org.yaml.snakeyaml.nodes.Tag
@@ -55,6 +56,8 @@ class DTParams extends Serializable {
   @BeanProperty var isRaw: String = _
   @BeanProperty var algorithmName: String = _
   @BeanProperty var testcaseType: String = _
+  @BeanProperty var saveDataPath: String = _
+  @BeanProperty var verifiedDataPath: String = _
 }
 
 object DTRunner {
@@ -63,11 +66,9 @@ object DTRunner {
       val modelConfSplit = args(0).split("_")
       val (algorithmType, dataStructure, datasetName, apiName) =
         (modelConfSplit(0), modelConfSplit(1), modelConfSplit(2), modelConfSplit(3))
-
       val dataPath = args(1)
       val dataPathSplit = dataPath.split(",")
       val (trainingDataPath, testDataPath) = (dataPathSplit(0), dataPathSplit(1))
-
       val cpuName = args(2)
       val isRaw = args(3)
       val sparkConfSplit = args(4).split("_")
@@ -82,7 +83,6 @@ object DTRunner {
         case ("x86_64", "yes") =>
           Utils.getStream("conf/ml/dt/dt_x86_raw.yml")
       }
-
       val representer = new Representer
       representer.addClassTag(classOf[DTParams], Tag.MAP)
       val options = new DumperOptions
@@ -90,24 +90,22 @@ object DTRunner {
       val yaml = new Yaml(new Constructor(classOf[DTConfig]), representer, options)
       val description = new TypeDescription(classOf[DTParams])
       yaml.addTypeDescription(description)
-
       val configs: DTConfig = yaml.load(stream).asInstanceOf[DTConfig]
+      val paramsMap: util.HashMap[String, Object] = configs.dt.get(algorithmType).get(dataStructure).get(datasetName)
       val params = new DTParams()
-
-      val dtParamMap: util.HashMap[String, Object] = configs.dt.get(algorithmType).get(dataStructure).get(datasetName)
-      params.setGenericPt(dtParamMap.getOrDefault("genericPt", "1000").asInstanceOf[Int])
-      params.setMaxMemoryInMB(dtParamMap.getOrDefault("maxMemoryInMB", "256").asInstanceOf[Int])
-      params.setPt(dtParamMap.getOrDefault("pt", "1000").asInstanceOf[Int])
-      params.setNumCopiesInput(dtParamMap.getOrDefault("numCopiesInput", "1").asInstanceOf[Int])
-      params.setMaxDepth(dtParamMap.getOrDefault("maxDepth", "5").asInstanceOf[Int])
-      params.setMaxBins(dtParamMap.getOrDefault("maxBins", "32").asInstanceOf[Int])
-      params.setNumClasses(dtParamMap.get("numClasses").asInstanceOf[Int])
-      params.setUseNodeIdCache(dtParamMap.getOrDefault("useNodeIdCache", "false").asInstanceOf[Boolean])
-      params.setCheckpointInterval(dtParamMap.getOrDefault("checkpointInterval", "10").asInstanceOf[Int])
-      params.setFeaturesType(dtParamMap.getOrDefault("featuresType", "array").asInstanceOf[String])
-      params.setBcVariables(dtParamMap.getOrDefault("bcVariables", "false").asInstanceOf[Boolean])
-      params.setCopyStrategy(dtParamMap.getOrDefault("copyStrategy", "normal").asInstanceOf[String])
-      params.setUseDFCollPtner(dtParamMap.getOrDefault("useDFCollPtner", "true").asInstanceOf[String])
+      params.setGenericPt(paramsMap.getOrDefault("genericPt", "1000").asInstanceOf[Int])
+      params.setMaxMemoryInMB(paramsMap.getOrDefault("maxMemoryInMB", "256").asInstanceOf[Int])
+      params.setPt(paramsMap.getOrDefault("pt", "1000").asInstanceOf[Int])
+      params.setNumCopiesInput(paramsMap.getOrDefault("numCopiesInput", "1").asInstanceOf[Int])
+      params.setMaxDepth(paramsMap.getOrDefault("maxDepth", "5").asInstanceOf[Int])
+      params.setMaxBins(paramsMap.getOrDefault("maxBins", "32").asInstanceOf[Int])
+      params.setNumClasses(paramsMap.get("numClasses").asInstanceOf[Int])
+      params.setUseNodeIdCache(paramsMap.getOrDefault("useNodeIdCache", "false").asInstanceOf[Boolean])
+      params.setCheckpointInterval(paramsMap.getOrDefault("checkpointInterval", "10").asInstanceOf[Int])
+      params.setFeaturesType(paramsMap.getOrDefault("featuresType", "array").asInstanceOf[String])
+      params.setBcVariables(paramsMap.getOrDefault("bcVariables", "false").asInstanceOf[Boolean])
+      params.setCopyStrategy(paramsMap.getOrDefault("copyStrategy", "normal").asInstanceOf[String])
+      params.setUseDFCollPtner(paramsMap.getOrDefault("useDFCollPtner", "true").asInstanceOf[String])
       params.setTrainingDataPath(trainingDataPath)
       params.setTestDataPath(testDataPath)
       params.setAlgorithmType(algorithmType)
@@ -116,14 +114,15 @@ object DTRunner {
       params.setCpuName(cpuName)
       params.setIsRaw(isRaw)
       params.setAlgorithmName("DT")
+      params.setSaveDataPath(s"hdfs:///tmp/ml/result/${params.algorithmName}/${algorithmType}/${datasetName}_${dataStructure}_${cpuName}_${apiName}")
 
       var appName = s"DT_${algorithmType}_${datasetName}_${dataStructure}_${apiName}"
       if (isRaw.equals("yes")){
         appName = s"DT_RAW_${algorithmType}_${datasetName}_${dataStructure}_${apiName}"
+        params.setVerifiedDataPath(params.saveDataPath)
+        params.setSaveDataPath(s"${params.saveDataPath}_raw")
       }
       params.setTestcaseType(appName)
-
-
       val conf = new SparkConf().setAppName(appName).setMaster(master)
       val commonParas = Array (
         ("spark.submit.deployMode", deployMode),
@@ -134,44 +133,34 @@ object DTRunner {
       conf.setAll(commonParas)
       if ("no" == isRaw.asInstanceOf[String]) {
         conf.set("spark.boostkit.ml.rf.binnedFeaturesDataType",
-          dtParamMap.get("featuresType").asInstanceOf[String])
+          paramsMap.get("featuresType").asInstanceOf[String])
         conf.set("spark.boostkit.ml.rf.numTrainingDataCopies",
-          dtParamMap.get("numCopiesInput").asInstanceOf[Int].toString)
+          paramsMap.get("numCopiesInput").asInstanceOf[Int].toString)
         conf.set("spark.boostkit.ml.rf.numPartsPerTrainingDataCopy",
-          dtParamMap.get("pt").asInstanceOf[Int].toString)
+          paramsMap.get("pt").asInstanceOf[Int].toString)
         conf.set("spark.boostkit.ml.rf.broadcastVariables",
-          dtParamMap.get("bcVariables").asInstanceOf[Boolean].toString)
+          paramsMap.get("bcVariables").asInstanceOf[Boolean].toString)
         conf.set("spark.boostkit.ml.rf.copyStrategy",
-          dtParamMap.get("copyStrategy").asInstanceOf[String])
+          paramsMap.get("copyStrategy").asInstanceOf[String])
         conf.set("spark.boostkit.ml.rf.useDFCollPartitioner",
-          dtParamMap.get("useDFCollPtner").asInstanceOf[String])
+          paramsMap.get("useDFCollPtner").asInstanceOf[String])
         if (dataStructure == "rdd") {
           conf.set("spark.boostkit.ml.rf.maxBins",
-            dtParamMap.get("maxBins").asInstanceOf[Int].toString)
+            paramsMap.get("maxBins").asInstanceOf[Int].toString)
           conf.set("spark.boostkit.ml.rf.maxMemoryInMB",
-            dtParamMap.get("maxMemoryInMB").asInstanceOf[Int].toString)
+            paramsMap.get("maxMemoryInMB").asInstanceOf[Int].toString)
         }
       }
       val spark = SparkSession.builder.config(conf).getOrCreate()
 
       val (res, costTime) = dataStructure match {
-        case "dataframe" => new DTKernel().dtDataframeJob(spark, params)
-        case "rdd" => new DTKernel().dtRDDJob(spark, params)
+        case "dataframe" => new DTKernel().runDataframeJob(spark, params)
+        case "rdd" => new DTKernel().runRDDJob(spark, params)
       }
       params.setEvaluation(res)
       params.setCostTime(costTime)
 
-      val folder = new File("report")
-      if (!folder.exists()) {
-        val mkdir = folder.mkdirs()
-        println(s"Create dir report ${mkdir}")
-      }
-      val writer = new FileWriter(s"report/DT_${
-        Utils.getDateStrFromUTC("yyyyMMdd_HHmmss",
-          System.currentTimeMillis())
-      }.yml")
-
-      yaml.dump(params, writer)
+      Utils.saveYml[DTParams](params, yaml)
       println(s"Exec Successful: costTime: ${costTime}s; evaluation: ${res}")
     } catch {
       case e: Throwable =>
@@ -181,7 +170,8 @@ object DTRunner {
 }
 
 class DTKernel {
-  def dtDataframeJob(spark: SparkSession, params: DTParams): (Double, Double) = {
+  def runDataframeJob(spark: SparkSession, params: DTParams): (Double, Double) = {
+    val sc = spark.sparkContext
     val pt = params.pt
     val trainingDataPath = params.trainingDataPath
     val testDataPath = params.testDataPath
@@ -191,10 +181,8 @@ class DTKernel {
     val checkpointInterval = params.checkpointInterval
     val maxMemoryInMB = params.maxMemoryInMB
     val genericPt = params.genericPt
-
     println(s"Initialized spark session.")
     val startTime = System.currentTimeMillis()
-
     val indexLabel: Boolean = params.datasetName match {
       case "mnist8m" =>
         false
@@ -287,18 +275,32 @@ class DTKernel {
         .setStages(Array(dTree))
     }
 
+
+    val paramMap = ParamMap(dTree.maxDepth -> maxDepth)
+      .put(dTree.maxBins, maxBins)
+
     val paramMaps = new Array[ParamMap](2)
     for (i <- 0 until paramMaps.size){
       paramMaps(i) = ParamMap(dTree.maxDepth -> maxDepth)
         .put(dTree.maxBins, maxBins)
     }
 
+
+    val maxDepth1 = maxDepthJY
+    val maxDepth2 = maxDepth
+    val firstParamPair = ParamPair(dTree.maxDepth, maxDepth1)
+    val otherParamPairs_1st = ParamPair(dTree.maxDepth, maxDepth2)
+    val otherParamPairs_2nd = ParamPair(dTree.maxBins, maxBins)
+
     val model = params.apiName match {
       case "fit" => pipeline.fit(trainingData)
-      case "fit1" =>
+      case "fit1" => pipeline.fit(trainingData, paramMap)
+      case "fit2" =>
         val models = pipeline.fit(trainingData, paramMaps)
         models(0)
+      case "fit3" => pipeline.fit(trainingData, firstParamPair, otherParamPairs_1st, otherParamPairs_2nd)
     }
+
 
     val costTime = (System.currentTimeMillis() - startTime) / 1000.0
 
@@ -336,11 +338,14 @@ class DTKernel {
           .setMetricName ("rmse")
     }
     val res = evaluator.evaluate(predictions)
+
+    Utils.saveAndVerifyRes[DTParams](params, res, sc)
+
     (res, costTime)
   }
 
-  def dtRDDJob(spark: SparkSession, params: DTParams): (Double, Double) = {
-
+  def runRDDJob(spark: SparkSession, params: DTParams): (Double, Double) = {
+    val sc = spark.sparkContext
     val pt = params.pt
     val trainingDataPath = params.trainingDataPath
     val testDataPath = params.testDataPath
@@ -348,8 +353,6 @@ class DTKernel {
     val maxBins = params.maxBins
     val genericPt = params.genericPt
     var numClasses = params.numClasses
-
-    val sc = spark.sparkContext
     println(s"Initialized spark session.")
     val startTime = System.currentTimeMillis()
 
@@ -397,6 +400,9 @@ class DTKernel {
       case "classification" => 1.0 - labeleAndPreds.filter(r => r._1 == r._2).count.toDouble / testLabelPositive.count()
       case "regression" => math.sqrt(labeleAndPreds.map{ case(v, p) => math.pow((v - p), 2)}.mean())
     }
+
+    Utils.saveAndVerifyRes[DTParams](params, res, sc)
+
     (res, costTime)
   }
 

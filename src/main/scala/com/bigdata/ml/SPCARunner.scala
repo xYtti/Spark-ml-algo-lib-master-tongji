@@ -2,7 +2,6 @@ package com.bigdata.ml
 
 import java.io.{File, FileWriter}
 import java.util
-
 import com.bigdata.utils.Utils
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
@@ -11,6 +10,8 @@ import org.apache.spark.ml.feature.PCA
 import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.mllib.linalg.{DenseMatrix, DenseVector}
 import org.apache.spark.storage.StorageLevel
+import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.spark.ml.param.{ParamMap, ParamPair}
 import org.yaml.snakeyaml.{DumperOptions, TypeDescription, Yaml}
 import org.yaml.snakeyaml.constructor.Constructor
 import org.yaml.snakeyaml.nodes.Tag
@@ -34,6 +35,7 @@ class SPCAParams extends Serializable {
   @BeanProperty var saveRes: Boolean = _
 
   @BeanProperty var inputDataPath: String = _
+  @BeanProperty var apiName: String = _
   @BeanProperty var datasetName: String = _
   @BeanProperty var isRaw: String = _
   @BeanProperty var cpuName: String = _
@@ -41,16 +43,19 @@ class SPCAParams extends Serializable {
   @BeanProperty var loadDataTime: Double = _
   @BeanProperty var algorithmName: String = _
   @BeanProperty var testcaseType: String = _
+  @BeanProperty var saveDataPath: String = _
+  @BeanProperty var verifiedDataPath: String = _
+
 }
 
 object SPCARunner {
   def main(args: Array[String]): Unit = {
 
     try {
-      val datasetName = args(0)
-
+      val modelConfSplit = args(0).split("-")
+      val (datasetName, apiName) =
+        (modelConfSplit(0), modelConfSplit(1))
       val inputDataPath = args(1)
-
       val cpuName = args(2)
       val isRaw = args(3)
       val sparkConfSplit = args(4).split("_")
@@ -72,31 +77,30 @@ object SPCARunner {
       yaml.addTypeDescription(description)
       val configs: SPCAConfig = yaml.load(stream).asInstanceOf[SPCAConfig]
       val params = new SPCAParams()
-
-      val spcaParamMap: util.HashMap[String, Object] = configs.spca.get(datasetName)
-      params.setPt(spcaParamMap.getOrDefault("pt", "250").asInstanceOf[Int])
-      params.setK(spcaParamMap.getOrDefault("k", "10").asInstanceOf[Int])
-      params.setSep(spcaParamMap.getOrDefault("sep", " ").asInstanceOf[String])
-      params.setNumCols(spcaParamMap.getOrDefault("numCols", "0").asInstanceOf[Int])
-      params.setPcPath(spcaParamMap.getOrDefault("pcPath", null.asInstanceOf[String]).asInstanceOf[String])
-      params.setSigmaPath(spcaParamMap.getOrDefault("sigmaPath", null.asInstanceOf[String]).asInstanceOf[String])
-      params.setSaveRes(spcaParamMap.getOrDefault("saveRes", "false").asInstanceOf[Boolean])
-
+      val paramsMap: util.HashMap[String, Object] = configs.spca.get(datasetName)
+      params.setPt(paramsMap.getOrDefault("pt", "250").asInstanceOf[Int])
+      params.setK(paramsMap.getOrDefault("k", "10").asInstanceOf[Int])
+      params.setSep(paramsMap.getOrDefault("sep", " ").asInstanceOf[String])
+      params.setNumCols(paramsMap.getOrDefault("numCols", "0").asInstanceOf[Int])
+      params.setPcPath(paramsMap.getOrDefault("pcPath", null.asInstanceOf[String]).asInstanceOf[String])
+      params.setSigmaPath(paramsMap.getOrDefault("sigmaPath", null.asInstanceOf[String]).asInstanceOf[String])
+      params.setSaveRes(paramsMap.getOrDefault("saveRes", "false").asInstanceOf[Boolean])
       params.setInputDataPath(inputDataPath)
       params.setDatasetName(datasetName)
+      params.setApiName(apiName)
       params.setCpuName(cpuName)
       params.setIsRaw(isRaw)
       params.setAlgorithmName("SPCA")
-
-      var appName = s"SPCA_${datasetName}"
+      params.setSaveDataPath(s"hdfs:///tmp/ml/result/${params.algorithmName}/${datasetName}_${apiName}")
+      var appName = s"SPCA_${datasetName}_${apiName}"
       if (isRaw == "yes") {
-        appName = s"SPCA_${datasetName}_raw"
+        appName = s"SPCA_${datasetName}_${apiName}_raw"
+        params.setVerifiedDataPath(params.saveDataPath)
+        params.setSaveDataPath(s"${params.saveDataPath}_raw")
       }
       params.setTestcaseType(appName)
-
       val conf = new SparkConf()
         .setAppName(appName).setMaster(master)
-
       val commonParas = Array (
         ("spark.submit.deployMode", deployMode),
         ("spark.executor.instances", numExec),
@@ -109,16 +113,7 @@ object SPCARunner {
       val costTime = new SPCAKernel().runJob(spark, params)
       params.setCostTime(costTime)
 
-      val folder = new File("report")
-      if (!folder.exists()) {
-        val mkdir = folder.mkdirs()
-        println(s"Create dir report ${mkdir}")
-      }
-      val writer = new FileWriter(s"report/SPCA_${
-        Utils.getDateStrFromUTC("yyyyMMdd_HHmmss",
-          System.currentTimeMillis())
-      }.yml")
-      yaml.dump(params, writer)
+      Utils.saveYml[SPCAParams](params, yaml)
       println(s"Exec Successful: costTime: ${costTime}s")
     } catch {
       case e: Throwable =>
@@ -133,11 +128,13 @@ class SPCAKernel {
   def runJob(spark: SparkSession, params: SPCAParams): Double = {
 
     import spark.implicits._
+    val sc = spark.sparkContext
+    val fs = FileSystem.get(sc.hadoopConfiguration)
     val startTime = System.currentTimeMillis()
     val trainingData = if (params.isRaw == "yes"){
-      val numColsBC = spark.sparkContext.broadcast(params.numCols)
-      val sepBC = spark.sparkContext.broadcast(params.sep)
-      val data = spark.createDataFrame(spark.sparkContext.textFile(params.inputDataPath, params.pt)
+      val numColsBC = sc.broadcast(params.numCols)
+      val sepBC = sc.broadcast(params.sep)
+      val data = spark.createDataFrame(sc.textFile(params.inputDataPath, params.pt)
         .map(line => {
           val entry = line.split(sepBC.value)
           (entry(0).toInt, (entry(1).toInt, entry(2).toDouble))
@@ -148,7 +145,7 @@ class SPCAKernel {
         .toDF("matrix").persist(StorageLevel.MEMORY_ONLY)
       data
     } else {
-      val data = spark.createDataFrame(spark.sparkContext.textFile(params.inputDataPath, params.pt)
+      val data = spark.createDataFrame(sc.textFile(params.inputDataPath, params.pt)
         .map(line => {
           val entry = line.split(params.sep)
           (entry(0).toInt, (entry(1).toInt, entry(2).toDouble))
@@ -165,28 +162,47 @@ class SPCAKernel {
     val loadDataTime = (System.currentTimeMillis() - startTime) / 1000.0
     params.setLoadDataTime(loadDataTime)
 
-    val model = if (params.isRaw == "no"){
+    val spca = if (params.isRaw == "no"){
       new SPCA()
         .setK(params.k)
         .setInputCol("matrix")
-        .fit(trainingData)
     } else {
       new PCA()
         .setK(params.k)
         .setInputCol("matrix")
-        .fit(trainingData)
     }
 
+    val paramMap = ParamMap(spca.k -> params.k)
+      .put(spca.inputCol, "matrix")
+    val paramMaps: Array[ParamMap] = new Array[ParamMap](2)
+    for (i <- 0 to paramMaps.size - 1) {
+      paramMaps(i) = ParamMap(spca.k -> params.k)
+        .put(spca.inputCol, "matrix")
+    }
+    val kPair = ParamPair(spca.k, params.k)
+    val inputColPair = ParamPair(spca.inputCol, "matrix")
+    val model = params.apiName match {
+      case "fit" => spca.fit(trainingData)
+      case "fit1" => spca.fit(trainingData, paramMaps)
+      case "fit2" =>
+        val models = spca.fit(trainingData, paramMaps)
+        models(0)
+      case "fit3" => spca.fit(trainingData, kPair, inputColPair)
+    }
     val costTime = (System.currentTimeMillis() - startTime) / 1000.0
     params.setLoadDataTime(costTime)
 
-    // save result
-    if (params.saveRes && params.pcPath != null && params.sigmaPath != null) {
-      Utils.writeMatrix(new DenseMatrix(model.pc.numRows, model.pc.numCols,
-        model.pc.values, model.pc.isTransposed), params.pcPath)
-      Utils.writeVector(new DenseVector(model.explainedVariance.toArray), params.sigmaPath)
+    val spcaMat = model.pc
+    Utils.saveMatrix(spcaMat, params.saveDataPath, sc)
+    if (params.isRaw == "yes") {
+      val verifiedFile = new Path(params.verifiedDataPath)
+      if (fs.exists(verifiedFile)) {
+        if (Utils.verifyMatrix(params.saveDataPath, params.verifiedDataPath, sc))
+          println(s"${params.algorithmName} correct")
+        else
+          println(s"${params.algorithmName} incorrect")
+      }
     }
-
     costTime
   }
 }

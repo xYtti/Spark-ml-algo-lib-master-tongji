@@ -1,14 +1,14 @@
 #!/bin/bash
 set -e
 
-ifRaw="opt"
+platformName="opt"
 case "$1" in
 -h | --help | ?)
   echo "Usage: <dataset name> <if checkModel>"
   echo "1rd argument: name of dataset: e.g. D10m200m"
   echo "2st argument: if checkModel: e.g. false"
   echo "Note: If you are sure you want to check the result(model), please run the idf_run_raw.sh script at least once first."
-  echo "This script will save the model in \${workspace}/output/models/\${datasetName}/${ifRaw}/"
+  echo "This script will save the model in \${workspace}/output/models/\${datasetName}/${platformName}/"
   exit 0
 esac
 
@@ -17,7 +17,7 @@ if [ $# -ne 2 ]; then
   echo "1rd argument: name of dataset: e.g. D10m200m"
   echo "2st argument: if checkModel: e.g. false"
   echo "Note: If you are sure you want to check the result(model), please run the idf_run_raw.sh script at least once first."
-  echo "This script will save the model in \${workspace}/output/models/\${datasetName}/${ifRaw}/"
+  echo "This script will save the model in \${workspace}/output/models/\${datasetName}/${platformName}/"
   exit 0
 fi
 
@@ -30,12 +30,12 @@ ifCheckModel=$2
 cpu_name=$(lscpu | grep Architecture | awk '{print $2}')
 
 # concatnate strings as a new variable
-num_executors=${cpu_name}_${ifRaw}"_"${dataset_name}"_numExecutors"
-executor_cores=${cpu_name}_${ifRaw}"_"${dataset_name}"_executorCores"
-executor_memory=${cpu_name}_${ifRaw}"_"${dataset_name}"_executorMemory"
-executor_extra_java_options=${cpu_name}_${ifRaw}"_"${dataset_name}"_extraJavaOptions"
-driver_cores=${cpu_name}_${ifRaw}"_"${dataset_name}"_driverCores"
-driver_memory=${cpu_name}_${ifRaw}"_"${dataset_name}"_driverMemory"
+num_executors=${cpu_name}_${platformName}"_"${dataset_name}"_numExecutors"
+executor_cores=${cpu_name}_${platformName}"_"${dataset_name}"_executorCores"
+executor_memory=${cpu_name}_${platformName}"_"${dataset_name}"_executorMemory"
+executor_extra_java_options=${cpu_name}_${platformName}"_"${dataset_name}"_extraJavaOptions"
+driver_cores=${cpu_name}_${platformName}"_"${dataset_name}"_driverCores"
+driver_memory=${cpu_name}_${platformName}"_"${dataset_name}"_driverMemory"
 
 num_executors_val=${!num_executors}
 executor_cores_val=${!executor_cores}
@@ -76,7 +76,7 @@ models_path=${dataset_name}_modelsPath
 models_path_val=${!models_path}
 echo "${dataset_name} : ${data_path_val}"
 echo "spark_version : ${spark_version_val}"
-echo "Is raw? ${ifRaw}"
+echo "Is raw? ${platformName}"
 echo "If checkoutModels? ${ifCheckModel}"
 echo "models_path : ${models_path_val}"
 echo "start to submit spark jobs"
@@ -102,4 +102,4 @@ spark-submit \
 --driver-java-options "-Xms15g" \
 --driver-class-path "lib/json4s-ext_2.11-3.2.11.jar:lib/boostkit-ml-acc_2.11-${kalVersion}-${spark_version_val}.jar:lib/boostkit-ml-core_2.11-${kalVersion}-${spark_version_val}.jar:lib/boostkit-ml-kernel-2.11-${kalVersion}-${spark_version_val}-${cpu_name}.jar" \
 --jars "lib/json4s-ext_2.11-3.2.11.jar,lib/boostkit-ml-acc_2.11-${kalVersion}-${spark_version_val}.jar,lib/boostkit-ml-core_2.11-${kalVersion}-${spark_version_val}.jar,lib/boostkit-ml-kernel-2.11-${kalVersion}-${spark_version_val}-${cpu_name}.jar" \
-./lib/kal-test_2.11-0.1.jar ${ifRaw} ${dataset_name} ${data_path_val} ${models_path_val} ${ifCheckModel}| tee ./log/log
+./lib/kal-test_2.11-0.1.jar ${platformName} ${dataset_name} ${data_path_val} ${models_path_val} ${ifCheckModel}| tee ./log/log

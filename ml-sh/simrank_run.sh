@@ -1,19 +1,20 @@
 #!/bin/bash
 set -e
 
+is_raw="no"
+algorithm_type="boostkit"
+
 case "$1" in
 -h | --help | ?)
-  echo "Usage: <dataset name> <api name>"
+  echo "Usage: <dataset name>"
   echo "1st argument: name of dataset: e.g. simrank3w"
-  echo "2nd argument: type of Algorithm: e.g. boostkit/raw"
   exit 0
   ;;
 esac
 
-if [ $# -ne 2 ]; then
-  echo "please input 2 arguments:<dataset name> <api name>"
+if [ $# -ne 1 ]; then
+  echo "please input 2 arguments:<dataset name>"
   echo "1st argument: name of dataset: e.g. simrank3w"
-  echo "2nd argument: type of Algorithm: e.g. boostkit/raw"
   exit 0
 fi
 
@@ -21,7 +22,6 @@ fi
 source conf/ml/simrank/simrank_spark.properties
 
 dataset_name=$1
-algorithm_type=$2
 cpu_name=$(lscpu | grep Architecture | awk '{print $2}')
 case_name=${dataset_name}-${algorithm_type}-${cpu_name}
 
@@ -85,7 +85,6 @@ ssh agent3 "echo 3 > /proc/sys/vm/drop_caches"
 sleep 30
 
 mkdir -p log
-if [[ ${algorithm_type} == "boostkit" ]]; then
 spark-submit \
 --class com.bigdata.ml.SimRankRunner \
 --deploy-mode ${deploy_mode_val} \
@@ -100,21 +99,4 @@ spark-submit \
 --jars "lib/fastutil-8.3.1.jar,lib/boostkit-ml-kernel-2.11-2.1.0-${spark_version_val}-${cpu_name}.jar" \
 --driver-class-path "lib/kal-test_2.11-0.1.jar:lib/fastutil-8.3.1.jar:lib/snakeyaml-1.19.jar:lib/boostkit-ml-kernel-2.11-2.1.0-${spark_version_val}-${cpu_name}.jar" \
 --conf "spark.executor.extraClassPath=fastutil-8.3.1.jar:boostkit-ml-kernel-2.11-2.1.0-${spark_version_val}-${cpu_name}.jar" \
-./lib/kal-test_2.11-0.1.jar ${case_name} ${data_path} | tee ./log/log
-else
-spark-submit \
---class com.bigdata.ml.SimRankRunner \
---deploy-mode ${deploy_mode_val} \
---driver-cores ${driver_cores_val} \
---driver-memory ${driver_memory_val} \
---num-executors ${num_executors_val} \
---executor-cores ${executor_cores_val} \
---executor-memory ${executor_memory_val} \
---master ${master_val} \
---conf "spark.executor.extraJavaOptions=${extra_java_options_val}" \
---conf "spark.executor.memoryOverhead=${executor_memory_overhead_val}" \
---jars "lib/fastutil-8.3.1.jar,lib/kal-test_2.11-0.1.jar" \
---driver-class-path "lib/kal-test_2.11-0.1.jar:lib/fastutil-8.3.1.jar:lib/snakeyaml-1.19.jar" \
---conf "spark.executor.extraClassPath=fastutil-8.3.1.jar:kal-test_2.11-0.1.jar" \
-./lib/kal-test_2.11-0.1.jar ${case_name} ${data_path} | tee ./log/log
-fi
+./lib/kal-test_2.11-0.1.jar ${case_name} ${data_path} ${is_raw} | tee ./log/log

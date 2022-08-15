@@ -2,15 +2,15 @@ package com.bigdata.ml
 
 import java.io.{File, FileWriter}
 import java.util
-
 import com.bigdata.utils.Utils
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.ml.linalg.DenseMatrix
 import org.apache.spark.ml.classification.LogisticRegression
-import org.apache.spark.ml.param.ParamMap
+import org.apache.spark.ml.param.{ParamMap, ParamPair}
 import org.apache.spark.ml.regression.LinearRegression
 import org.apache.spark.sql.functions.udf
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.yaml.snakeyaml.{DumperOptions, TypeDescription, Yaml}
 import org.yaml.snakeyaml.constructor.Constructor
 import org.yaml.snakeyaml.nodes.Tag
@@ -42,9 +42,10 @@ class LinRParams extends Serializable {
   @BeanProperty var evaluation: Double = _
   @BeanProperty var costTime: Double = _
   @BeanProperty var loadDataTime: Double = _
-
   @BeanProperty var algorithmName: String = _
   @BeanProperty var testcaseType: String = _
+  @BeanProperty var saveDataPath: String = _
+  @BeanProperty var verifiedDataPath: String = _
 }
 
 object LinRRunner {
@@ -54,11 +55,9 @@ object LinRRunner {
       val modelConfSplit = args(0).split("_")
       val (datasetName, apiName) =
         (modelConfSplit(0), modelConfSplit(1))
-
       val dataPath = args(1)
       val dataPathSplit = dataPath.split(",")
       val (trainingDataPath, testDataPath) = (dataPathSplit(0), dataPathSplit(1))
-
       val cpuName = args(2)
       val isRaw = args(3)
       val sparkConfSplit = args(4).split("_")
@@ -81,17 +80,15 @@ object LinRRunner {
       val description = new TypeDescription(classOf[LinRParams])
       yaml.addTypeDescription(description)
       val configs: LinRConfig = yaml.load(stream).asInstanceOf[LinRConfig]
+      val paramsMap: util.HashMap[String, Object] = configs.linR.get(cpuName).get(datasetName)
       val params = new LinRParams()
-
-      val linRParamMap: util.HashMap[String, Object] = configs.linR.get(cpuName).get(datasetName)
-      params.setPt(linRParamMap.getOrDefault("pt", "2000").asInstanceOf[Int])
-      params.setNumFeatures(linRParamMap.getOrDefault("numFeatures", "500").asInstanceOf[Int])
-      params.setLoss(linRParamMap.getOrDefault("loss", "squaredError").asInstanceOf[String])
-      params.setRegParam(linRParamMap.getOrDefault("regParam", "0.01").asInstanceOf[Double])
-      params.setElasticNetParam(linRParamMap.getOrDefault("elasticNetParam", "0.0").asInstanceOf[Double])
-      params.setMaxIter(linRParamMap.getOrDefault("maxIter", "500").asInstanceOf[Int])
-      params.setTolerance(linRParamMap.getOrDefault("tolerance", "1E-6").asInstanceOf[Double])
-
+      params.setPt(paramsMap.getOrDefault("pt", "2000").asInstanceOf[Int])
+      params.setNumFeatures(paramsMap.getOrDefault("numFeatures", "500").asInstanceOf[Int])
+      params.setLoss(paramsMap.getOrDefault("loss", "squaredError").asInstanceOf[String])
+      params.setRegParam(paramsMap.getOrDefault("regParam", "0.01").asInstanceOf[Double])
+      params.setElasticNetParam(paramsMap.getOrDefault("elasticNetParam", "0.0").asInstanceOf[Double])
+      params.setMaxIter(paramsMap.getOrDefault("maxIter", "500").asInstanceOf[Int])
+      params.setTolerance(paramsMap.getOrDefault("tolerance", "1E-6").asInstanceOf[Double])
       params.setTrainingDataPath(trainingDataPath)
       params.setTestDataPath(testDataPath)
       params.setApiName(apiName)
@@ -99,10 +96,12 @@ object LinRRunner {
       params.setCpuName(cpuName)
       params.setIsRaw(isRaw)
       params.setAlgorithmName("LinR")
-
+      params.setSaveDataPath(s"hdfs:///tmp/ml/result/${params.algorithmName}/${datasetName}_${cpuName}")
       var appName = s"LinR_${datasetName}_${apiName}"
       if (isRaw.equals("yes")){
         appName = s"LinR_RAW_${datasetName}_${apiName}"
+        params.setVerifiedDataPath(params.saveDataPath)
+        params.setSaveDataPath(s"${params.saveDataPath}_raw")
       }
       params.setTestcaseType(appName)
       val conf = new SparkConf()
@@ -120,16 +119,7 @@ object LinRRunner {
       params.setEvaluation(res)
       params.setCostTime(costTime)
 
-      val folder = new File("report")
-      if (!folder.exists()) {
-        val mkdir = folder.mkdirs()
-        println(s"Create dir report ${mkdir}")
-      }
-      val writer = new FileWriter(s"report/LinRegression_${
-        Utils.getDateStrFromUTC("yyyyMMdd_HHmmss",
-          System.currentTimeMillis())
-      }.yml")
-      yaml.dump(params, writer)
+      Utils.saveYml[LinRParams](params, yaml)
       println(s"Exec Successful: costTime: ${costTime}s; evaluation: ${res}")
     } catch {
       case e: Throwable =>
@@ -144,6 +134,7 @@ class LinRKernel {
   def runJob(spark: SparkSession, params: LinRParams): (Double, Double) = {
 
     import spark.implicits._
+    val sc = spark.sparkContext
     val startTime = System.currentTimeMillis()
     val trainData = spark
       .read
@@ -180,17 +171,23 @@ class LinRKernel {
       linR.setMaxIter(params.maxIter)
     }
 
+    val paramMap = ParamMap(linR.maxIter -> params.maxIter)
+      .put(linR.regParam, params.regParam)
     val paramMaps: Array[ParamMap] = new Array[ParamMap](2)
     for (i <- 0 to paramMaps.size -1) {
       paramMaps(i) = ParamMap(linR.maxIter -> params.maxIter)
         .put(linR.regParam, params.regParam)
     }
+    val maxIterParamPair = ParamPair(linR.maxIter, params.maxIter)
+    val regParamPair = ParamPair(linR.regParam, params.regParam)
 
     val model = params.apiName match {
       case "fit" => linR.fit(trainingData)
-      case "fit1" =>
+      case "fit1" => linR.fit(trainingData, paramMap)
+      case "fit2" =>
         val models = linR.fit(trainingData, paramMaps)
         models(0)
+      case "fit3" => linR.fit(trainingData, maxIterParamPair, regParamPair)
     }
     val costTime = (System.currentTimeMillis() - startTime) / 1000.0
     params.setLoadDataTime(loadDataTime)
@@ -219,6 +216,8 @@ class LinRKernel {
       .select("squaredError").summary("mean")
 
     val res = predictions.select("squaredError").first().getString(0).toDouble
+
+    Utils.saveAndVerifyRes[LinRParams](params, res, sc)
 
     (res, costTime)
   }

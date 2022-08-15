@@ -2,17 +2,17 @@ package com.bigdata.ml
 
 import java.io.{File, FileWriter}
 import java.util
-
 import scala.beans.BeanProperty
 import com.bigdata.utils.Utils
 import org.apache.spark.ml.stat
 import org.apache.spark.ml.linalg.SQLDataTypes.VectorType
-import org.apache.spark.ml.linalg.{Matrix, Vectors, Vector}
-import org.apache.spark.mllib.linalg.{Vectors => OldVectors}
+import org.apache.spark.mllib.linalg.{DenseMatrix, Matrix, Vector, Vectors}
+import org.apache.spark.ml.linalg.{Vectors => OldVectors}
 import org.apache.spark.sql.{DataFrame, Row, SparkSession}
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.storage.StorageLevel
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.yaml.snakeyaml.{DumperOptions, TypeDescription, Yaml}
 import org.yaml.snakeyaml.constructor.Constructor
 import org.yaml.snakeyaml.nodes.Tag
@@ -24,7 +24,6 @@ class PearsonConfig extends Serializable {
 
 class PearsonParams extends Serializable {
   @BeanProperty var pt: Int = _
-  @BeanProperty var sum: Double = _
 
   @BeanProperty var trainingDataPath: String = _
   @BeanProperty var outputDataPath: String = _
@@ -33,9 +32,10 @@ class PearsonParams extends Serializable {
   @BeanProperty var costTime: Double = _
   @BeanProperty var cpuName: String = _
   @BeanProperty var isRaw: String = _
-  @BeanProperty var startTime: Long = _
   @BeanProperty var algorithmName: String = _
   @BeanProperty var testcaseType: String = _
+  @BeanProperty var saveDataPath: String = _
+  @BeanProperty var verifiedDataPath: String = _
 }
 
 object PearsonRunner {
@@ -44,11 +44,9 @@ object PearsonRunner {
     try {
       val modelConfSplit = args(0).split("_")
       val (dataStructure, datasetName) = (modelConfSplit(0), modelConfSplit(1))
-
       val dataPath = args(1)
       val dataPathSplit = dataPath.split(",")
       val (trainingDataPath, outputDataPath) = (dataPathSplit(0), dataPathSplit(1))
-
       val cpuName = args(2)
       val isRaw = args(3)
       val sparkConfSplit = args(4).split("_")
@@ -71,11 +69,9 @@ object PearsonRunner {
       val description = new TypeDescription(classOf[PearsonParams])
       yaml.addTypeDescription(description)
       val configs: PearsonConfig = yaml.load(stream).asInstanceOf[PearsonConfig]
+      val paramsMap: util.HashMap[String, Object] = configs.pearson.get(cpuName).get(dataStructure).get(datasetName)
       val params = new PearsonParams()
-
-      val pearsonParamMap: util.HashMap[String, Object] = configs.pearson.get(cpuName).get(dataStructure).get(datasetName)
-      params.setPt(pearsonParamMap.getOrDefault("pt", "1000").asInstanceOf[Int])
-
+      params.setPt(paramsMap.getOrDefault("pt", "1000").asInstanceOf[Int])
       params.setTrainingDataPath(trainingDataPath)
       params.setOutputDataPath(outputDataPath)
       params.setApiName(dataStructure)
@@ -84,13 +80,15 @@ object PearsonRunner {
       params.setIsRaw(isRaw)
       params.setAlgorithmName("Pearson")
       params.setTestcaseType(s"Pearson_${dataStructure}_${datasetName}")
+      params.setSaveDataPath(s"hdfs:///tmp/ml/result/${params.algorithmName}/${dataStructure}_${datasetName}")
 
       var appName = s"Pearson_${dataStructure}_${datasetName}"
       if (isRaw.equals("yes")){
         appName = s"Pearson_RAW_${dataStructure}_${datasetName}"
+        params.setVerifiedDataPath(params.saveDataPath)
+        params.setSaveDataPath(s"${params.saveDataPath}_raw")
       }
       params.setTestcaseType(appName)
-
       val conf = isRaw match {
         case "yes" =>
           new SparkConf().setAppName(s"Pearson_raw_${dataStructure}_${datasetName}").setMaster(master)
@@ -104,34 +102,19 @@ object PearsonRunner {
         ("spark.executor.memory", execMem)
       )
       conf.setAll(commonParas)
-
       val spark = SparkSession.builder.config(conf).getOrCreate()
       println(s"Initialized spark session.")
-      val startTime = System.currentTimeMillis()
-      params.setStartTime(startTime)
-      val sc = spark.sparkContext
 
-      val (sum, costTime) = dataStructure match {
+      val costTime = dataStructure match {
         case "dataframe" =>
           new PearsonKernel().runDataframeJob(spark, params)
         case "rdd" =>
           new PearsonKernel().runRddJob(spark, params)
       }
-      params.setSum(sum)
       params.setCostTime(costTime)
 
-      val folder = new File("report")
-      if (!folder.exists()) {
-        val mkdir = folder.mkdirs()
-        println(s"Create dir report ${mkdir}")
-      }
-      val writer = new FileWriter(s"report/Pearson_${
-        Utils.getDateStrFromUTC("yyyyMMdd_HHmmss",
-          System.currentTimeMillis())
-      }.yml")
-
-      yaml.dump(params, writer)
-      println(s"Exec Successful: costTime: ${costTime}s; Matrix sum: ${sum}")
+      Utils.saveYml[PearsonParams](params, yaml)
+      println(s"Exec Successful: costTime: ${costTime}s")
     } catch {
       case e: Throwable =>
         println(s"Exec Failure: ${e.getMessage}")
@@ -141,11 +124,13 @@ object PearsonRunner {
 
 class PearsonKernel {
 
-  def runDataframeJob(spark: SparkSession, params: PearsonParams): (Double, Double) = {
+  def runDataframeJob(spark: SparkSession, params: PearsonParams): Double = {
     val pt = params.pt
-
+    val sc = spark.sparkContext
+    val fs = FileSystem.get(sc.hadoopConfiguration)
+    val startTime = System.currentTimeMillis()
     val data = spark.createDataFrame(
-      spark.sparkContext
+      sc
         .textFile(params.trainingDataPath)
         .map(x=>Row(Vectors.dense(x.split(",").map(_.toDouble))))
         .repartition(pt),
@@ -153,30 +138,33 @@ class PearsonKernel {
     ).persist(StorageLevel.MEMORY_ONLY)
 
     val mat = stat.Correlation.corr(data, "matrix")
-
-    val costTime = (System.currentTimeMillis() - params.startTime) / 1000.0
-
-    val result = mat.collect()(0).getAs[Matrix](0).toArray
-    val sum = result.sum
-
+    val costTime = (System.currentTimeMillis() - startTime) / 1000.0
+    val pearsonMat = mat.collect()(0).getAs[DenseMatrix](0)
     //save result
-    val res = new Array[String](mat.count().toInt)
-    for(i <- 0 until mat.count().toInt) {
-      val row = result.slice(i * mat.count().toInt, (i + 1) * mat.first().size).mkString(";")
-      res(i) = i.toString + " " + row
+    Utils.saveMatrix(pearsonMat, params.saveDataPath, sc)
+    if (params.isRaw == "yes") {
+      val verifiedFile = new Path(params.verifiedDataPath)
+      if (fs.exists(verifiedFile)) {
+        val ori = Utils.readMatrix(params.saveDataPath, sc)
+        val opt = Utils.readMatrix(params.verifiedDataPath, sc)
+        if (Utils.isEqualMatrix(ori, opt))
+          println(s"${params.algorithmName} correct")
+        else
+          println(s"${params.algorithmName} incorrect")
+      }
     }
-    spark.sparkContext.parallelize(res).repartition(100).saveAsTextFile(s"${params.outputDataPath}_${params.cpuName}_${params.isRaw}")
 
-    (sum, costTime)
+    costTime
   }
 
-  def runRddJob(spark: SparkSession, params: PearsonParams): (Double, Double) = {
+  def runRddJob(spark: SparkSession, params: PearsonParams): Double = {
 
     val pt = params.pt
-
+    val sc = spark.sparkContext
+    val fs = FileSystem.get(sc.hadoopConfiguration)
+    val startTime = System.currentTimeMillis()
     val data = spark.createDataFrame(
-      spark.sparkContext
-        .textFile(params.trainingDataPath)
+      sc.textFile(params.trainingDataPath)
         .map(x=>Row(Vectors.dense(x.split(",").map(_.toDouble))))
         .repartition(pt),
       StructType(List(StructField("matrix", VectorType)))
@@ -188,20 +176,21 @@ class PearsonKernel {
 
     import org.apache.spark.mllib.stat.{Statistics => OldStatistics}
     val oldM = OldStatistics.corr(rdd, "pearson")
-    val costTime = (System.currentTimeMillis() - params.startTime) / 1000.0
-
-    val result = oldM.toArray
-    val sum = result.sum
-
+    val pearsonMat = oldM.asInstanceOf[DenseMatrix]
+    val costTime = (System.currentTimeMillis() - startTime) / 1000.0
     //save result
-    val res = new Array[String](oldM.numRows)
-    for(i <- 0 until oldM.numRows) {
-      val row = result.slice(i * oldM.numRows, (i + 1) * oldM.numCols).mkString(";")
-      res(i) = i.toString + " " + row
+    Utils.saveMatrix(pearsonMat, params.saveDataPath, sc)
+    if (params.isRaw == "yes") {
+      val verifiedFile = new Path(params.verifiedDataPath)
+      if (fs.exists(verifiedFile)) {
+        if (Utils.verifyMatrix(params.saveDataPath, params.verifiedDataPath, sc))
+          println(s"${params.algorithmName} correct")
+        else
+          println(s"${params.algorithmName} incorrect")
+      }
     }
-    spark.sparkContext.parallelize(res).repartition(100).saveAsTextFile(s"${params.outputDataPath}_${params.cpuName}_${params.isRaw}")
 
-    (sum, costTime)
+    costTime
   }
 
 }
